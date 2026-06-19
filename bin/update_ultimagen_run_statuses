@@ -1,0 +1,53 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use npg_tracking::Schema;
+use Carp;
+use DateTime;
+use DateTime::TimeZone;
+use File::Spec::Functions qw( catdir );
+
+my $user_name = $ENV{USER};
+
+my $schema = npg_tracking::Schema->connect();
+my $date = DateTime->now(time_zone => DateTime::TimeZone->new(name => q[local]));
+
+my $user = $schema->resultset('User')->search({username => $user_name})->next;
+my $comment = 'Archival finalised. Info available in JIRA ticket https://jira.sanger.ac.uk/browse/NPG-3832';
+my $ann = $schema->resultset('Annotation')->create({
+  id_user => $user->id_user,
+  comment => $comment,
+  date => $date
+});
+
+my $rs = $schema->resultset('Run')->search(
+  {
+    'run_statuses.iscurrent' => 1,
+    'run_status_dict.description' => 'archival on hold'
+  },
+  {
+   join => {run_statuses => 'run_status_dict'},
+   prefetch => {run_statuses => 'run_status_dict'}
+  }
+);
+
+my $update_status = 'run archived';
+my $count = 0;
+while (my $run_row = $rs->next()) {
+  warn sprintf("Considering run %d\n", $run_row->id_run);
+  if (!$run_row->instrument->manufacturer_is_UltimaGenomics()) {
+    next;
+  }
+  $count++;
+
+  my $status = $run_row->update_run_status($update_status, $user_name);
+  $schema->resultset('RunAnnotation')->create({
+    id_run => $run_row->id_run,
+    id_annotation => $ann->id_annotation
+  });
+  warn sprintf("Updated status for run ID %s to '%s'\n", $run_row->id_run, $update_status);
+  my $runfolder_path = catdir($run_row->folder_path_glob, $run_row->folder_name);
+  printf "npg_ultimagen_run2mlwarehouse --id_run %s --runfolder_path %s\n", $run_row->id_run, $runfolder_path;
+}
+warn "\n\nConsidered $count runs\n";
